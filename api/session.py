@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from config import MAX_HISTORY_TURNS
 
 CLEANUP_INTERVAL_SECONDS = 300
+MAX_SESSIONS = 1000
 
 
 @dataclass
@@ -59,9 +60,16 @@ class SessionManager:
             self._cleanup_timer.cancel()
             self._cleanup_timer = None
 
+    def _evict_oldest(self) -> None:
+        if len(self._sessions) <= MAX_SESSIONS:
+            return
+        oldest_sid = min(self._sessions, key=lambda s: self._sessions[s].last_active)
+        del self._sessions[oldest_sid]
+
     def get_or_create(self, session_id: str | None = None) -> Session:
         if session_id and session_id in self._sessions:
             return self._sessions[session_id]
+        self._evict_oldest()
         sid = session_id or str(uuid.uuid4())
         session = Session(session_id=sid)
         self._sessions[sid] = session

@@ -75,6 +75,3 @@ def setup_openvino():
     py_dir = str(OPENVINO_PYTHON_DIR)
     if py_dir not in sys.path:
         sys.path.insert(0, py_dir)
-
-
-setup_openvino()
