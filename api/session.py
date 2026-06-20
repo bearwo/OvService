@@ -43,6 +43,7 @@ class SessionManager:
     def __init__(self, timeout_seconds: int = 1800):
         self._sessions: dict[str, Session] = {}
         self._timeout = timeout_seconds
+        self._lock = threading.Lock()
         self._cleanup_timer: threading.Timer | None = None
         self._start_cleanup_timer()
 
@@ -53,6 +54,7 @@ class SessionManager:
 
     def _cleanup_and_reschedule(self) -> None:
         self.cleanup_expired()
+        self._evict_oldest()
         self._start_cleanup_timer()
 
     def stop_cleanup(self) -> None:
@@ -61,45 +63,49 @@ class SessionManager:
             self._cleanup_timer = None
 
     def _evict_oldest(self) -> None:
-        if len(self._sessions) <= MAX_SESSIONS:
-            return
-        oldest_sid = min(self._sessions, key=lambda s: self._sessions[s].last_active)
-        del self._sessions[oldest_sid]
+        while len(self._sessions) > MAX_SESSIONS:
+            oldest_sid = min(self._sessions, key=lambda s: self._sessions[s].last_active)
+            del self._sessions[oldest_sid]
 
     def get_or_create(self, session_id: str | None = None) -> Session:
-        if session_id and session_id in self._sessions:
-            return self._sessions[session_id]
-        self._evict_oldest()
-        sid = session_id or str(uuid.uuid4())
-        session = Session(session_id=sid)
-        self._sessions[sid] = session
-        return session
+        with self._lock:
+            if session_id and session_id in self._sessions:
+                return self._sessions[session_id]
+            self._evict_oldest()
+            sid = session_id or str(uuid.uuid4())
+            session = Session(session_id=sid)
+            self._sessions[sid] = session
+            return session
 
     def get(self, session_id: str) -> Session | None:
-        return self._sessions.get(session_id)
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def delete(self, session_id: str) -> bool:
-        if session_id in self._sessions:
-            del self._sessions[session_id]
-            return True
-        return False
+        with self._lock:
+            if session_id in self._sessions:
+                del self._sessions[session_id]
+                return True
+            return False
 
     def cleanup_expired(self) -> int:
-        expired = [
-            sid for sid, s in self._sessions.items()
-            if s.age_seconds > self._timeout
-        ]
-        for sid in expired:
-            del self._sessions[sid]
-        return len(expired)
+        with self._lock:
+            expired = [
+                sid for sid, s in self._sessions.items()
+                if s.age_seconds > self._timeout
+            ]
+            for sid in expired:
+                del self._sessions[sid]
+            return len(expired)
 
     def list_sessions(self) -> list[dict]:
-        return [
-            {
-                "session_id": s.session_id,
-                "created_at": s.created_at,
-                "last_active": s.last_active,
-                "message_count": len(s._history),
-            }
-            for s in self._sessions.values()
-        ]
+        with self._lock:
+            return [
+                {
+                    "session_id": s.session_id,
+                    "created_at": s.created_at,
+                    "last_active": s.last_active,
+                    "message_count": len(s._history),
+                }
+                for s in self._sessions.values()
+            ]

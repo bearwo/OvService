@@ -24,7 +24,10 @@ class WebUIHandler(SimpleHTTPRequestHandler):
         if self.path == "/" or self.path == "/index.html":
             self._serve_file(TEMPLATE_DIR / "index.html", "text/html")
         elif self.path.startswith("/static/"):
-            file_path = STATIC_DIR / self.path[8:]
+            file_path = (STATIC_DIR / self.path[8:]).resolve()
+            if not file_path.is_relative_to(STATIC_DIR.resolve()):
+                self.send_error(403)
+                return
             content_type = self._get_content_type(file_path)
             self._serve_file(file_path, content_type)
         elif self.path.startswith("/v1/") or self.path.startswith("/health"):
@@ -100,7 +103,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             self.send_response(502)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(f'{{"error": "{e}"}}'.encode())
+            self.wfile.write(json.dumps({"error": str(e)}).encode())
 
     def _get_content_type(self, file_path: Path) -> str:
         ext = file_path.suffix.lower()

@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import StreamingResponse
 
 VALID_ROLES = {"user", "assistant", "system"}
 
@@ -24,23 +27,19 @@ def _validate_messages(messages: list[dict]) -> None:
                 status_code=400,
                 detail=f"Message {i}: 'content' must be a string, got {type(content).__name__}",
             )
-from fastapi.responses import StreamingResponse
-
 from api.schemas import (
     ChatRequest,
     ChatResponse,
     ModelsResponse,
     ModelInfo,
     HealthResponse,
-    TaskResponse,
     KnowledgeAddRequest,
     KnowledgeSearchRequest,
     KnowledgeResponse,
     KnowledgeDocInfo,
 )
 from api.session import SessionManager
-from api.task_queue import TaskQueue, TaskStatus
-from config import MAX_CONCURRENT, UPLOADS_DIR
+from config import UPLOADS_DIR
 from core.base import GenerateConfig
 from core.engine import ModelEngine
 from features.memory import ConversationMemory
@@ -49,7 +48,6 @@ from features.image import load_image_from_bytes
 
 router = APIRouter()
 session_mgr = SessionManager()
-task_queue = TaskQueue(max_concurrent=MAX_CONCURRENT)
 memory = ConversationMemory()
 knowledge = KnowledgeBase()
 
@@ -62,17 +60,13 @@ def _get_engine() -> ModelEngine:
 def health():
     engine = _get_engine()
     active = engine.active()
-    database_ok = False
     model_loaded = False
+    database_ok = False
     try:
-        import sqlite3
-        from config import DB_PATH
-        conn = sqlite3.connect(str(DB_PATH), timeout=2)
-        conn.execute("SELECT 1")
-        conn.close()
+        memory._get_conn().execute("SELECT 1")
         database_ok = True
     except Exception:
-        database_ok = False
+        pass
     if active:
         model_loaded = active._loaded
     return HealthResponse(
@@ -131,9 +125,13 @@ async def chat(req: ChatRequest, session_id: str = Query(default="default")):
     )
 
     session = session_mgr.get_or_create(session_id)
+    session.clear()
     for msg in req.messages:
         session.add_message(msg["role"], msg["content"])
-        memory.save_message(session_id, msg["role"], msg["content"])
+
+    if req.messages:
+        last_user_msg = next((m for m in reversed(req.messages) if m["role"] == "user"), req.messages[-1])
+        memory.save_message(session_id, last_user_msg["role"], last_user_msg["content"])
 
     knowledge_context = ""
     if req.use_knowledge and req.messages:
@@ -166,9 +164,13 @@ async def chat_stream(req: ChatRequest, session_id: str = Query(default="default
     )
 
     session = session_mgr.get_or_create(session_id)
+    session.clear()
     for msg in req.messages:
         session.add_message(msg["role"], msg["content"])
-        memory.save_message(session_id, msg["role"], msg["content"])
+
+    if req.messages:
+        last_user_msg = next((m for m in reversed(req.messages) if m["role"] == "user"), req.messages[-1])
+        memory.save_message(session_id, last_user_msg["role"], last_user_msg["content"])
 
     knowledge_context = ""
     if req.use_knowledge and req.messages:
@@ -178,28 +180,37 @@ async def chat_stream(req: ChatRequest, session_id: str = Query(default="default
 
     async def event_generator():
         loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        done_event = asyncio.Event()
         full_response = []
 
-        def run_stream():
-            for token in engine.generate_stream(
-                session.to_messages(), config, knowledge_context=knowledge_context
-            ):
-                full_response.append(token)
-                yield token
+        def on_token(text):
+            full_response.append(text)
+            loop.call_soon_threadsafe(queue.put_nowait, text)
 
-        gen = run_stream()
-
-        def next_token():
+        def run_generate():
             try:
-                return next(gen)
-            except StopIteration:
-                return None
+                engine.generate_stream(
+                    session.to_messages(), config,
+                    knowledge_context=knowledge_context,
+                    on_token=on_token,
+                )
+            finally:
+                loop.call_soon_threadsafe(done_event.set)
+
+        gen_thread = threading.Thread(target=run_generate, daemon=True)
+        gen_thread.start()
 
         while True:
-            token = await loop.run_in_executor(None, next_token)
-            if token is None:
-                break
-            yield f"data: {json.dumps({'token': token})}\n\n"
+            try:
+                token = await asyncio.wait_for(queue.get(), timeout=0.5)
+                yield f"data: {json.dumps({'token': token})}\n\n"
+            except asyncio.TimeoutError:
+                if done_event.is_set():
+                    while not queue.empty():
+                        token = queue.get_nowait()
+                        yield f"data: {json.dumps({'token': token})}\n\n"
+                    break
 
         response_text = "".join(full_response)
         session.add_message("assistant", response_text)
@@ -216,6 +227,7 @@ async def chat_image_upload(
     message: str = Form(default="Describe this image"),
     max_length: int = Form(default=2048),
     temperature: float = Form(default=0.7),
+    top_p: float = Form(default=0.9),
     file: UploadFile = File(...),
 ):
     engine = _get_engine()
@@ -228,7 +240,7 @@ async def chat_image_upload(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid image: {e}")
 
-    config = GenerateConfig(max_length=max_length, temperature=temperature)
+    config = GenerateConfig(max_length=max_length, temperature=temperature, top_p=top_p)
     session = session_mgr.get_or_create(session_id)
     session.add_message("user", f"[Image] {message}")
     memory.save_message(session_id, "user", f"[Image] {message}")
@@ -302,12 +314,14 @@ async def knowledge_upload(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"File extension '{ext}' not allowed")
     if file.size and file.size > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large: {file.size} bytes (max: {MAX_UPLOAD_SIZE})")
-    dest = UPLOADS_DIR / safe_name
+    dest = UPLOADS_DIR / (uuid.uuid4().hex[:8] + '_' + safe_name)
     content = await file.read()
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail=f"File too large: {len(content)} bytes (max: {MAX_UPLOAD_SIZE})")
     dest.write_bytes(content)
     result = knowledge.add_file(dest)
+    if dest.exists():
+        dest.unlink()
     return KnowledgeDocInfo(id=result['doc_id'], filename=result['filename'], chunk_count=result['chunk_count'], filepath=str(dest), imported_at=result['imported_at'])
 
 
@@ -328,10 +342,3 @@ def knowledge_list():
 def knowledge_delete(doc_id: int):
     knowledge.delete_document(doc_id)
     return {"status": "deleted", "doc_id": doc_id}
-
-
-@router.post("/tasks/{task_id}/cancel")
-def cancel_task(task_id: str):
-    if task_queue.cancel(task_id):
-        return {"status": "cancelled", "task_id": task_id}
-    raise HTTPException(status_code=404, detail="Task not found or not cancellable")

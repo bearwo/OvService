@@ -120,12 +120,25 @@ class ChatAdapter(BaseModelAdapter):
                     self.load()
                 gc = self._build_config(config)
                 use_messages = messages if attempt == 0 else self._truncate_messages(messages)
+                if images:
+                    img_items = [{"type": "image"} for _ in images]
+                    last_user_idx = next(
+                        (i for i in range(len(use_messages) - 1, -1, -1) if use_messages[i].get("role") == "user"),
+                        -1,
+                    )
+                    if last_user_idx >= 0:
+                        msg = use_messages[last_user_idx]
+                        content = msg.get("content", "")
+                        if isinstance(content, str):
+                            use_messages = list(use_messages)
+                            use_messages[last_user_idx] = {"role": "user", "content": [{"type": "text", "text": content}] + img_items}
                 prompt = self._messages_to_prompt(use_messages, knowledge_context)
                 t0 = time.perf_counter()
                 if images:
                     result = self._pipe.generate(prompt, images=images, generation_config=gc)
                 else:
                     result = self._pipe.generate(prompt, generation_config=gc)
+                self._pipe.finish_chat()
                 elapsed_ms = (time.perf_counter() - t0) * 1000
                 text = str(result.texts[0]) if hasattr(result, "texts") else str(result)
                 if not _is_garbled(text) or attempt == 1:
@@ -162,7 +175,7 @@ class ChatAdapter(BaseModelAdapter):
                         self._pipe.generate(prompt, generation_config=gc, streamer=collector)
 
                 result = []
-                cleared = False
+                cleared = True
 
                 def handle_token(text):
                     nonlocal cleared
@@ -177,6 +190,7 @@ class ChatAdapter(BaseModelAdapter):
                 gen_thread.start()
                 collector.stream(handle_token)
                 gen_thread.join()
+                self._pipe.finish_chat()
 
                 full_text = "".join(result)
                 if not _is_garbled(full_text) or attempt == 1:
@@ -187,26 +201,26 @@ class ChatAdapter(BaseModelAdapter):
                         sys.stdout.flush()
                     return full_text
                 else:
-                    result.clear()
                     cleared = True
                     if not on_token:
                         print("[Output garbled, retrying with shorter context...]")
-            return full_text
 
     def _messages_to_prompt(self, messages: list[dict], knowledge_context: str = "") -> str:
         tok = self._pipe.get_tokenizer()
         chat_msgs = []
-        if knowledge_context:
-            chat_msgs.append({"role": "system", "content": "Use the following context to answer the question:\n\n" + knowledge_context})
-        else:
-            chat_msgs.append({"role": "system", "content": "You are a helpful assistant."})
+        has_system = messages and messages[0].get("role") == "system"
+        if not has_system:
+            if knowledge_context:
+                chat_msgs.append({"role": "system", "content": "Use the following context to answer the question:\n\n" + knowledge_context})
+            else:
+                chat_msgs.append({"role": "system", "content": "You are a helpful assistant."})
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if isinstance(content, list):
-                text_parts = [c.get("text", "") for c in content if c.get("type") == "text"]
-                content = " ".join(text_parts)
-            chat_msgs.append({"role": role, "content": content})
+                chat_msgs.append({"role": role, "content": content})
+            else:
+                chat_msgs.append({"role": role, "content": content})
         return tok.apply_chat_template(
             chat_msgs,
             add_generation_prompt=True,
