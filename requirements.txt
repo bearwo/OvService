@@ -1,0 +1,11 @@
+numpy>=1.16.6,<2.5.0
+openvino-telemetry>=2023.2.1
+fastapi>=0.100.0
+uvicorn>=0.30.0
+aiofiles>=24.0
+python-multipart>=0.0.9
+rich>=13.0
+prompt_toolkit>=3.0.0
+Pillow==12.2.0
+PyMuPDF>=1.24.0
+pydantic==2.13.3
