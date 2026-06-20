@@ -178,37 +178,36 @@ async def chat_stream(req: ChatRequest, session_id: str = Query(default="default
 
     async def event_generator():
         loop = asyncio.get_running_loop()
+        full_response = []
 
-        result = await loop.run_in_executor(
-            None, lambda: engine.generate(
+        def run_stream():
+            for token in engine.generate_stream(
                 session.to_messages(), config, knowledge_context=knowledge_context
-            )
-        )
+            ):
+                full_response.append(token)
+                yield token
 
-        response_text = result.text
+        gen = run_stream()
+
+        def next_token():
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        while True:
+            token = await loop.run_in_executor(None, next_token)
+            if token is None:
+                break
+            yield f"data: {json.dumps({'token': token})}\n\n"
+
+        response_text = "".join(full_response)
         session.add_message("assistant", response_text)
         memory.save_message(session_id, "assistant", response_text)
-
-        chunk_size = 20
-        for i in range(0, len(response_text), chunk_size):
-            yield f"data: {json.dumps({'token': response_text[i:i+chunk_size]})}\n\n"
 
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-@router.post("/chat/image")
-async def chat_image(
-    session_id: str = Query(default="default"),
-    message: str = Form(default="Describe this image"),
-    max_length: int = Form(default=2048),
-    temperature: float = Form(default=0.7),
-):
-    engine = _get_engine()
-    if not engine.active():
-        raise HTTPException(status_code=400, detail="No model loaded")
-    raise HTTPException(status_code=501, detail="Use POST /chat/image/upload instead")
 
 
 @router.post("/chat/image/upload", response_model=ChatResponse)
@@ -292,6 +291,8 @@ def knowledge_add(req: KnowledgeAddRequest):
         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
 
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+
 @router.post("/knowledge/upload", response_model=KnowledgeDocInfo)
 async def knowledge_upload(file: UploadFile = File(...)):
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -299,8 +300,12 @@ async def knowledge_upload(file: UploadFile = File(...)):
     ext = Path(safe_name).suffix.lower()
     if ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(status_code=400, detail=f"File extension '{ext}' not allowed")
+    if file.size and file.size > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large: {file.size} bytes (max: {MAX_UPLOAD_SIZE})")
     dest = UPLOADS_DIR / safe_name
     content = await file.read()
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large: {len(content)} bytes (max: {MAX_UPLOAD_SIZE})")
     dest.write_bytes(content)
     result = knowledge.add_file(dest)
     return KnowledgeDocInfo(id=result['doc_id'], filename=result['filename'], chunk_count=result['chunk_count'], filepath=str(dest), imported_at=result['imported_at'])

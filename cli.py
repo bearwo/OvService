@@ -14,7 +14,9 @@ if hasattr(sys.stdout, "reconfigure"):
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import setup_openvino, CHAT_MODEL, DEFAULT_DEVICE, DB_COMPRESS_MAX_COUNT, DB_COMPRESS_MAX_RATIO, DATA_DIR, get_model_context_length
+import config
+config.setup_openvino()
+
 from core.engine import ModelEngine
 from core.conversation import Conversation
 from adapters.chat import ChatAdapter
@@ -225,7 +227,7 @@ def handle_command(cmd: str, engine: ModelEngine, conv: Conversation,
                 console.print(f"[red]Session '{target_id}' not found.[/red]")
         elif sub == "export":
             exported = memory.export_session(session_id)
-            export_path = DATA_DIR / f"session_{session_id}.json"
+            export_path = config.DATA_DIR / f"session_{session_id}.json"
             export_path.write_text(exported, encoding="utf-8")
             console.print(f"[dim]Exported to {export_path}[/dim]")
         else:
@@ -323,10 +325,10 @@ def _auto_summarize(memory: ConversationMemory, engine: ModelEngine,
 
 def _maybe_compress_db(engine: ModelEngine, memory: ConversationMemory, session_id: str) -> None:
     summaries = memory.get_all_summaries(session_id, level=0)
-    count_ok = len(summaries) >= DB_COMPRESS_MAX_COUNT
+    count_ok = len(summaries) >= config.DB_COMPRESS_MAX_COUNT
     total_chars = sum(len(s["summary"]) for s in summaries)
-    max_tokens = get_model_context_length()
-    size_ok = (total_chars // 2) >= int(max_tokens * DB_COMPRESS_MAX_RATIO)
+    max_tokens = config.get_model_context_length()
+    size_ok = (total_chars // 2) >= int(max_tokens * config.DB_COMPRESS_MAX_RATIO)
     if not count_ok and not size_ok:
         return
     old_ids = [s["id"] for s in summaries[:-2]]
@@ -349,10 +351,8 @@ def _maybe_compress_db(engine: ModelEngine, memory: ConversationMemory, session_
 
 
 def main():
-    setup_openvino()
-
     engine = ModelEngine()
-    adapter = ChatAdapter(CHAT_MODEL, DEFAULT_DEVICE)
+    adapter = ChatAdapter(config.CHAT_MODEL, config.DEFAULT_DEVICE)
     engine.register(adapter)
     engine.set_active("chat")
 
@@ -397,9 +397,13 @@ def main():
         else:
             print("AI: ", end="", flush=True)
 
-        full_response = engine.generate_stream(conv.to_messages())
-        if not isinstance(full_response, str):
-            full_response = str(full_response)
+        try:
+            full_response = engine.generate_stream(conv.to_messages())
+            if not isinstance(full_response, str):
+                full_response = str(full_response)
+        except Exception as e:
+            console.print(f"\n[red]Generation error: {e}[/red]")
+            continue
         conv.add_assistant(full_response)
         memory.save_message(session_id, "assistant", full_response)
 

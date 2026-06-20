@@ -114,6 +114,14 @@ class KnowledgeBase:
 
     def delete_document(self, doc_id: int) -> bool:
         conn = self._get_conn()
+        row = conn.execute("SELECT filepath FROM knowledge_docs WHERE id = ?", (doc_id,)).fetchone()
+        if row:
+            filepath = Path(row["filepath"])
+            if filepath.exists():
+                filepath.unlink()
+            kb_file = self._kb_dir / filepath.name
+            if kb_file.exists():
+                kb_file.unlink()
         conn.execute("DELETE FROM knowledge_chunks WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM knowledge_docs WHERE id = ?", (doc_id,))
         conn.commit()

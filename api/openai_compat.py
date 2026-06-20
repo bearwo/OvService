@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 import uuid
 from typing import Any
@@ -93,6 +94,8 @@ async def chat_completions(req: OpenAIChatRequest):
         raise HTTPException(status_code=400, detail="No model loaded")
 
     messages = [{"role": m.role, "content": m.content or ""} for m in req.messages]
+    if not messages or not any(m.get("role") == "user" for m in messages):
+        messages = [{"role": "user", "content": "Hello"}]
 
     config = GenerateConfig(
         max_length=req.max_tokens or 4096,
@@ -138,25 +141,52 @@ async def chat_completions(req: OpenAIChatRequest):
 
 
 async def _stream_chat(engine, messages, config, model):
-    loop = asyncio.get_running_loop()
+    if not messages or not any(m.get("role") == "user" for m in messages):
+        messages = [{"role": "user", "content": "Hello"}]
+
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    queue = asyncio.Queue()
+    done_event = asyncio.Event()
 
-    result = await loop.run_in_executor(
-        None, lambda: engine.generate(messages, config)
-    )
+    def on_token(text):
+        try:
+            queue.put_nowait(text)
+        except Exception:
+            pass
 
-    text = result.text if hasattr(result, "text") else str(result)
+    def run_generate():
+        try:
+            engine.generate_stream(messages, config, on_token=on_token)
+        finally:
+            done_event.set()
 
-    chunk_size = 20
-    for i in range(0, len(text), chunk_size):
-        chunk_data = {
-            "id": chunk_id,
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": text[i:i+chunk_size]}, "finish_reason": None}],
-        }
-        yield f"data: {json.dumps(chunk_data)}\n\n"
+    gen_thread = threading.Thread(target=run_generate, daemon=True)
+    gen_thread.start()
+
+    while True:
+        try:
+            token = await asyncio.wait_for(queue.get(), timeout=0.5)
+            chunk_data = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk_data)}\n\n"
+        except asyncio.TimeoutError:
+            if done_event.is_set():
+                while not queue.empty():
+                    token = queue.get_nowait()
+                    chunk_data = {
+                        "id": chunk_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model,
+                        "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+                break
 
     final_data = {
         "id": chunk_id,

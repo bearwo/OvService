@@ -79,6 +79,7 @@ class ChatAdapter(BaseModelAdapter):
         super().__init__(model_path, device)
         self._pipe = None
         self.thinking = True
+        self._gen_lock = threading.Lock()
 
     def load(self) -> None:
         if self._loaded:
@@ -113,27 +114,28 @@ class ChatAdapter(BaseModelAdapter):
         images: list[ov.Tensor] | None = None,
         knowledge_context: str = "",
     ) -> GenerateResult:
-        for attempt in range(2):
-            if not self._loaded:
-                self.load()
-            gc = self._build_config(config)
-            use_messages = messages if attempt == 0 else self._truncate_messages(messages)
-            prompt = self._messages_to_prompt(use_messages, knowledge_context)
-            t0 = time.perf_counter()
-            if images:
-                result = self._pipe.generate(prompt, images=images, generation_config=gc)
-            else:
-                result = self._pipe.generate(prompt, generation_config=gc)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            text = str(result.texts[0]) if hasattr(result, "texts") else str(result)
-            if not _is_garbled(text) or attempt == 1:
-                tok = self._pipe.get_tokenizer()
-                try:
-                    encoded = tok.encode(text)
-                    tokens = encoded.input_ids.shape[1] if len(encoded.input_ids.shape) > 1 else len(encoded.input_ids.data)
-                except Exception:
-                    tokens = 0
-                return GenerateResult(text=text, tokens=tokens, elapsed_ms=elapsed_ms)
+        with self._gen_lock:
+            for attempt in range(2):
+                if not self._loaded:
+                    self.load()
+                gc = self._build_config(config)
+                use_messages = messages if attempt == 0 else self._truncate_messages(messages)
+                prompt = self._messages_to_prompt(use_messages, knowledge_context)
+                t0 = time.perf_counter()
+                if images:
+                    result = self._pipe.generate(prompt, images=images, generation_config=gc)
+                else:
+                    result = self._pipe.generate(prompt, generation_config=gc)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                text = str(result.texts[0]) if hasattr(result, "texts") else str(result)
+                if not _is_garbled(text) or attempt == 1:
+                    tok = self._pipe.get_tokenizer()
+                    try:
+                        encoded = tok.encode(text)
+                        tokens = encoded.input_ids.shape[1] if len(encoded.input_ids.shape) > 1 else len(encoded.input_ids.data)
+                    except Exception:
+                        tokens = 0
+                    return GenerateResult(text=text, tokens=tokens, elapsed_ms=elapsed_ms)
 
     def generate_stream(
         self,
@@ -141,48 +143,55 @@ class ChatAdapter(BaseModelAdapter):
         config: GenerateConfig | None = None,
         images: list[ov.Tensor] | None = None,
         knowledge_context: str = "",
-    ) -> str:
-        for attempt in range(2):
-            if not self._loaded:
-                self.load()
-            gc = self._build_config(config)
-            use_messages = messages if attempt == 0 else self._truncate_messages(messages)
-            prompt = self._messages_to_prompt(use_messages, knowledge_context)
-            tokenizer = self._pipe.get_tokenizer()
-            collector = _TextCollector(tokenizer)
+        on_token=None,
+    ):
+        with self._gen_lock:
+            for attempt in range(2):
+                if not self._loaded:
+                    self.load()
+                gc = self._build_config(config)
+                use_messages = messages if attempt == 0 else self._truncate_messages(messages)
+                prompt = self._messages_to_prompt(use_messages, knowledge_context)
+                tokenizer = self._pipe.get_tokenizer()
+                collector = _TextCollector(tokenizer)
 
-            def run_generate():
-                if images:
-                    self._pipe.generate(prompt, images=images, generation_config=gc, streamer=collector)
+                def run_generate():
+                    if images:
+                        self._pipe.generate(prompt, images=images, generation_config=gc, streamer=collector)
+                    else:
+                        self._pipe.generate(prompt, generation_config=gc, streamer=collector)
+
+                result = []
+                cleared = False
+
+                def handle_token(text):
+                    nonlocal cleared
+                    result.append(text)
+                    if on_token:
+                        on_token(text)
+                    elif not cleared:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+
+                gen_thread = threading.Thread(target=run_generate, daemon=True)
+                gen_thread.start()
+                collector.stream(handle_token)
+                gen_thread.join()
+
+                full_text = "".join(result)
+                if not _is_garbled(full_text) or attempt == 1:
+                    if not on_token and cleared:
+                        print(full_text)
+                    if not on_token:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    return full_text
                 else:
-                    self._pipe.generate(prompt, generation_config=gc, streamer=collector)
-
-            result = []
-            cleared = False
-
-            def on_token(text):
-                nonlocal cleared
-                result.append(text)
-                if not cleared:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-
-            gen_thread = threading.Thread(target=run_generate, daemon=True)
-            gen_thread.start()
-            collector.stream(on_token)
-            gen_thread.join()
-
-            full_text = "".join(result)
-            if not _is_garbled(full_text) or attempt == 1:
-                if cleared:
-                    print(full_text)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-                return full_text
-            else:
-                result.clear()
-                cleared = True
-                print("[Output garbled, retrying with shorter context...]")
+                    result.clear()
+                    cleared = True
+                    if not on_token:
+                        print("[Output garbled, retrying with shorter context...]")
+            return full_text
 
     def _messages_to_prompt(self, messages: list[dict], knowledge_context: str = "") -> str:
         tok = self._pipe.get_tokenizer()

@@ -5,7 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import setup_openvino, CHAT_MODEL, DEFAULT_DEVICE, API_HOST, API_PORT
+import config
+config.setup_openvino()
+
 from core.engine import ModelEngine
 from adapters.chat import ChatAdapter
 from api.routes import router
@@ -16,7 +18,7 @@ import uvicorn
 
 def init_model():
     engine = ModelEngine()
-    adapter = ChatAdapter(CHAT_MODEL, DEFAULT_DEVICE)
+    adapter = ChatAdapter(config.CHAT_MODEL, config.DEFAULT_DEVICE)
     engine.register(adapter)
     engine.set_active("chat")
     print(f"Loading {adapter.name} from {adapter.model_path}...")
@@ -41,12 +43,11 @@ def create_app():
 
 
 def main():
-    setup_openvino()
     init_model()
 
     app = create_app()
-    print(f"Starting OvService API on {API_HOST}:{API_PORT}")
-    uvicorn.run(app, host=API_HOST, port=API_PORT, log_level="info")
+    print(f"Starting OvService API on {config.API_HOST}:{config.API_PORT}")
+    uvicorn.run(app, host=config.API_HOST, port=config.API_PORT, log_level="info")
 
 
 if __name__ == "__main__":
