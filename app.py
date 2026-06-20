@@ -13,6 +13,7 @@ from adapters.chat import ChatAdapter
 from api.routes import router
 from api.openai_compat import router as openai_router
 
+import os
 import uvicorn
 
 
@@ -31,9 +32,10 @@ def create_app():
     from fastapi.middleware.cors import CORSMiddleware
 
     app = FastAPI(title="OvService", version="1.0.0")
+    origins = ["*"] if os.environ.get("OVSERVICE_CORS_ALLOW_ALL", "1") == "1" else ["http://localhost:3000", "http://127.0.0.1:3000"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # development only — restrict in production
+        allow_origins=origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 config.setup_openvino()
 
+from core.base import GenerateConfig
 from core.engine import ModelEngine
 from core.conversation import Conversation
 from adapters.chat import ChatAdapter
@@ -398,7 +399,7 @@ def main():
             print("AI: ", end="", flush=True)
 
         try:
-            full_response = engine.generate_stream(conv.to_messages())
+            full_response = engine.generate_stream(conv.to_messages(), GenerateConfig(max_length=8192, temperature=0.7))
             if not isinstance(full_response, str):
                 full_response = str(full_response)
         except Exception as e:

@@ -344,6 +344,14 @@ python D:\AISpace\Workspace\OvService\webui\server.py
 - **乱码检测**：字母比例 < 40% 是可靠的检测标准
 - **Session 内存**：设置 1000 条上限防止内存泄漏
 
+### 6. VLMPipeline 并发安全经验
+- **VLMPipeline 非线程安全**：必须用 `_gen_lock` 序列化请求
+- **每次 generate() 后必须调用 finish_chat()**：清除 KV cache，防止不同 session 上下文混合
+- **finish_chat() 必须在主线程调用**：在 worker 线程中调用可能不生效
+- **start_chat() 单次请求不需要调用**：仅在多轮对话场景下需要
+- **图片理解**：prompt 中必须包含 `{"type": "image"}` 项，模板会自动渲染为 `<think>...</think>` 标签
+- **多 session 并发**：锁序列化 + finish_chat() 重置 = 正确的并发处理
+
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
@@ -352,3 +360,4 @@ python D:\AISpace\Workspace\OvService\webui\server.py
 | 1.1 | 2026-06-20 | 模型切换为 Qwen3.6-35B，动态上下文管理 |
 | 1.2 | 2026-06-20 | OpenAI 兼容 API，安全修复，稳定性优化 |
 | 1.3 | 2026-06-20 | Web UI 模块，流式输出修复，全面代码审查优化 |
+| 1.4 | 2026-06-20 | 多 session 并发修复（finish_chat），图片理解修复，3轮代码审查优化共修复 80+ 问题 |

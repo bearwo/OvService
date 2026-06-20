@@ -15,8 +15,14 @@ let messages = [];
 let chatHistory = [];
 let currentChatId = Date.now().toString();
 let isGenerating = false;
-let sessionId = crypto.randomUUID();
+let sessionId;
+try { sessionId = crypto.randomUUID(); } catch { sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2); }
 let selectedFile = null;
+
+// Force clear any cached messages from previous sessions
+if (sessionStorage.getItem('ovservice_messages')) {
+    sessionStorage.removeItem('ovservice_messages');
+}
 
 const uploadBtn = document.getElementById('upload-btn');
 const fileInput = document.getElementById('file-input');
@@ -36,6 +42,10 @@ function handleFileSelect(file) {
 }
 
 function clearSelectedFile() {
+    const img = filePreview.querySelector('img');
+    if (img && img.src && img.src.startsWith('blob:')) {
+        URL.revokeObjectURL(img.src);
+    }
     selectedFile = null;
     fileInput.value = '';
     filePreview.style.cssText = 'display: none !important';
@@ -52,6 +62,11 @@ inputEl.addEventListener('keydown', (e) => {
     }
 });
 
+inputEl.oninput = function() {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+};
+
 sendBtn.onclick = sendMessage;
 newChatBtn.onclick = newChat;
 clearChatBtn.onclick = clearChat;
@@ -66,7 +81,7 @@ function addMessage(role, content, file = null) {
             const url = URL.createObjectURL(file);
             fileHtml = `<div class="msg-file"><img src="${url}" style="max-width:300px;max-height:200px;border-radius:8px;margin-top:8px"></div>`;
         } else {
-            fileHtml = `<div class="msg-file"><span class="file-icon">📄</span> ${file.name}</div>`;
+            fileHtml = `<div class="msg-file"><span class="file-icon">📄</span> ${escapeHtml(file.name)}</div>`;
         }
     }
 
@@ -162,6 +177,11 @@ async function uploadImage(file, question, contentEl) {
         body: formData
     });
 
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+    }
+
     const data = await res.json();
     const reply = String(data.text || (typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail)) || 'No response');
     contentEl.innerHTML = formatResponse(reply);
@@ -179,6 +199,11 @@ async function uploadDocument(file, contentEl) {
         body: formData
     });
 
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+    }
+
     const data = await res.json();
     if (data.detail) {
         contentEl.textContent = 'Error: ' + data.detail;
@@ -194,11 +219,11 @@ async function loadModels() {
         const data = await res.json();
         const select = document.getElementById('model-select');
         select.innerHTML = '';
-        if (data.models && data.models.length > 0) {
-            data.models.forEach(model => {
+        if (data.data && data.data.length > 0) {
+            data.data.forEach(model => {
                 const opt = document.createElement('option');
-                opt.value = model.name;
-                opt.textContent = model.name + (model.loaded ? '' : ' (not loaded)');
+                opt.value = model.id;
+                opt.textContent = model.root || model.id;
                 select.appendChild(opt);
             });
         } else {
@@ -212,13 +237,24 @@ async function loadModels() {
     }
 }
 
-document.getElementById('model-select').onchange = (e) => {
-    console.log('Model selected:', e.target.value);
+document.getElementById('model-select').onchange = async (e) => {
+    const name = e.target.value;
+    try {
+        await fetch(`${API_DIRECT}/models/${name}/load`, { method: 'POST' });
+        document.getElementById('model-status').textContent = name;
+        document.getElementById('model-status').style.background = '#27ae60';
+    } catch(err) {
+        document.getElementById('model-status').textContent = 'Error';
+        document.getElementById('model-status').style.background = '#e74c3c';
+    }
 };
 
 loadModels();
 
 async function streamResponse(text, contentEl) {
+    if (!messages || messages.length === 0) {
+        messages = [{ role: 'user', content: text }];
+    }
     const res = await fetch(`${API_DIRECT}/v1/chat/completions?session_id=${sessionId}&_t=${Date.now()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -230,6 +266,11 @@ async function streamResponse(text, contentEl) {
             stream: true
         })
     });
+
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -257,7 +298,9 @@ async function streamResponse(text, contentEl) {
                             contentEl.innerHTML = formatResponse(fullText);
                             messagesEl.scrollTop = messagesEl.scrollHeight;
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.warn('SSE parse error:', e.message, data);
+                    }
             }
         }
     }
@@ -271,14 +314,17 @@ function newChat() {
     }
     messages = [];
     currentChatId = Date.now().toString();
-    sessionId = crypto.randomUUID();
+    try { sessionId = crypto.randomUUID(); } catch { sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2); }
     messagesEl.innerHTML = '<div class="welcome"><h1>OvService</h1><p>Powered by OpenVINO GenAI</p><p>Start chatting below</p></div>';
 }
 
 function clearChat() {
+    if (messages.length > 0) {
+        saveChatToHistory();
+    }
     messages = [];
     currentChatId = Date.now().toString();
-    sessionId = crypto.randomUUID();
+    try { sessionId = crypto.randomUUID(); } catch { sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2); }
     messagesEl.innerHTML = '<div class="welcome"><h1>OvService</h1><p>Powered by OpenVINO GenAI</p><p>Start chatting below</p></div>';
 }
 
@@ -310,7 +356,7 @@ function saveChatToHistory() {
 
 function renderHistory() {
     historyEl.innerHTML = chatHistory.map(chat => `
-        <div class="history-item" onclick="loadChat('${chat.id}')">${chat.title}</div>
+        <div class="history-item" onclick="loadChat('${chat.id}')">${escapeHtml(chat.title)}</div>
     `).join('');
 }
 

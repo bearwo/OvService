@@ -145,20 +145,27 @@ async def _stream_chat(engine, messages, config, model):
         messages = [{"role": "user", "content": "Hello"}]
 
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
     done_event = asyncio.Event()
 
     def on_token(text):
-        try:
-            queue.put_nowait(text)
-        except Exception:
-            pass
+        loop.call_soon_threadsafe(queue.put_nowait, text)
 
     def run_generate():
         try:
             engine.generate_stream(messages, config, on_token=on_token)
+        except Exception as e:
+            error_chunk = {
+                'id': chunk_id,
+                'object': 'chat.completion.chunk',
+                'created': int(time.time()),
+                'model': model,
+                'choices': [{'index': 0, 'delta': {'content': f'Error: {e}'}, 'finish_reason': 'stop'}],
+            }
+            loop.call_soon_threadsafe(queue.put_nowait, f'data: {json.dumps(error_chunk)}\n\n')
         finally:
-            done_event.set()
+            loop.call_soon_threadsafe(done_event.set)
 
     gen_thread = threading.Thread(target=run_generate, daemon=True)
     gen_thread.start()
