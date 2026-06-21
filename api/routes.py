@@ -76,6 +76,16 @@ def health():
     )
 
 
+@router.post("/chat/stream/interrupt")
+def interrupt_generation():
+    engine = _get_engine()
+    adapter = engine.active()
+    if adapter and hasattr(adapter, "interrupt"):
+        adapter.interrupt()
+        return {"status": "interrupted"}
+    return {"status": "no active generation"}
+
+
 @router.get("/models", response_model=ModelsResponse)
 def list_models():
     engine = _get_engine()
@@ -125,12 +135,10 @@ async def chat(req: ChatRequest, session_id: str = Query(default="default")):
     )
 
     session = session_mgr.get_or_create(session_id)
-    session.clear()
-    for msg in req.messages:
-        session.add_message(msg["role"], msg["content"])
 
     if req.messages:
         last_user_msg = next((m for m in reversed(req.messages) if m["role"] == "user"), req.messages[-1])
+        session.add_message(last_user_msg["role"], last_user_msg["content"])
         memory.save_message(session_id, last_user_msg["role"], last_user_msg["content"])
 
     knowledge_context = ""
@@ -141,7 +149,7 @@ async def chat(req: ChatRequest, session_id: str = Query(default="default")):
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
-        None, lambda: engine.generate(session.to_messages(), config, knowledge_context=knowledge_context)
+        None, lambda: engine.generate(req.messages, config, knowledge_context=knowledge_context)
     )
 
     session.add_message("assistant", result.text)
@@ -164,12 +172,10 @@ async def chat_stream(req: ChatRequest, session_id: str = Query(default="default
     )
 
     session = session_mgr.get_or_create(session_id)
-    session.clear()
-    for msg in req.messages:
-        session.add_message(msg["role"], msg["content"])
 
     if req.messages:
         last_user_msg = next((m for m in reversed(req.messages) if m["role"] == "user"), req.messages[-1])
+        session.add_message(last_user_msg["role"], last_user_msg["content"])
         memory.save_message(session_id, last_user_msg["role"], last_user_msg["content"])
 
     knowledge_context = ""
@@ -191,7 +197,7 @@ async def chat_stream(req: ChatRequest, session_id: str = Query(default="default
         def run_generate():
             try:
                 engine.generate_stream(
-                    session.to_messages(), config,
+                    req.messages, config,
                     knowledge_context=knowledge_context,
                     on_token=on_token,
                 )
@@ -294,7 +300,7 @@ ALLOWED_UPLOAD_EXTENSIONS = {".txt", ".md", ".pdf", ".json", ".csv"}
 @router.post("/knowledge/add", response_model=KnowledgeDocInfo)
 def knowledge_add(req: KnowledgeAddRequest):
     resolved = os.path.realpath(req.file_path)
-    if not any(resolved.startswith(d) for d in ALLOWED_KNOWLEDGE_DIRS):
+    if not any(Path(resolved).is_relative_to(Path(d)) for d in ALLOWED_KNOWLEDGE_DIRS):
         raise HTTPException(status_code=403, detail="Access denied: path outside allowed directories")
     try:
         result = knowledge.add_file(resolved)

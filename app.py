@@ -9,6 +9,7 @@ import config
 config.setup_openvino()
 
 from core.engine import ModelEngine
+from core.base import GenerateConfig
 from adapters.chat import ChatAdapter
 from api.routes import router
 from api.openai_compat import router as openai_router
@@ -25,6 +26,9 @@ def init_model():
     print(f"Loading {adapter.name} from {adapter.model_path}...")
     adapter.load()
     print(f"Model loaded in {adapter.status().load_time_ms:.0f}ms")
+    print("Warming up model...")
+    adapter.generate([{"role": "user", "content": "hi"}], GenerateConfig(max_length=1))
+    print("Warmup complete.")
 
 
 def create_app():

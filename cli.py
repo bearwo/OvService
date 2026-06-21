@@ -160,6 +160,12 @@ def handle_command(cmd: str, engine: ModelEngine, conv: Conversation,
         cmd_help()
     elif command == "/clear":
         conv.clear()
+        try:
+            adapter = engine.active()
+            if adapter and adapter._loaded:
+                adapter._pipe.finish_chat()
+        except Exception:
+            pass
         console.print("[dim]Conversation cleared.[/dim]")
     elif command == "/history":
         console.print(conv.summary())
@@ -253,14 +259,14 @@ def handle_command(cmd: str, engine: ModelEngine, conv: Conversation,
         else:
             print("AI: ", end="", flush=True)
         result = engine.generate(
-            [{"role": "user", "content": question}],
+            conv.to_messages() + [{"role": "user", "content": question}],
             images=[tensor],
         )
         text = result.text if hasattr(result, "text") else str(result)
         sys.stdout.write(text)
         sys.stdout.write("\n")
         sys.stdout.flush()
-        conv.add_user(f"[Image: {image_path.name}] {question}")
+        conv.add_user_with_image(f"[Image: {image_path.name}] {question}", str(image_path))
         conv.add_assistant(text)
         memory.save_message(session_id, "assistant", text)
     elif command == "/model":
@@ -371,6 +377,11 @@ def main():
     adapter.load()
     console.print(f"[green]Model loaded in {adapter._load_time_ms:.0f}ms[/green]\n")
 
+    try:
+        conv._tokenizer = adapter._pipe.get_tokenizer()
+    except Exception:
+        pass
+
     while True:
         try:
             user_input = console.input("[bold cyan]You:[/bold cyan] ")
@@ -398,12 +409,29 @@ def main():
         else:
             print("AI: ", end="", flush=True)
 
+        lazy_tensor = None
+        if conv.is_asking_about_image(user_input):
+            img_path = conv.get_recent_image_path(max_turns_ago=10)
+            if img_path:
+                try:
+                    lazy_tensor = load_image_as_tensor(img_path)
+                except Exception:
+                    pass
+
         try:
-            full_response = engine.generate_stream(conv.to_messages(), GenerateConfig(max_length=8192, temperature=0.7))
+            if lazy_tensor:
+                full_response = engine.generate_stream(
+                    conv.to_messages() + [{"role": "user", "content": user_input}],
+                    GenerateConfig(max_length=8192, temperature=0.7),
+                    images=[lazy_tensor],
+                )
+            else:
+                full_response = engine.generate_stream(conv.to_messages(), GenerateConfig(max_length=8192, temperature=0.7))
             if not isinstance(full_response, str):
                 full_response = str(full_response)
         except Exception as e:
             console.print(f"\n[red]Generation error: {e}[/red]")
+            console.print("[dim]Context may be corrupted. Use /clear to reset or /session new to start fresh.[/dim]")
             continue
         conv.add_assistant(full_response)
         memory.save_message(session_id, "assistant", full_response)

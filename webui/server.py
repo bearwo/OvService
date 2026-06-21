@@ -36,7 +36,7 @@ class WebUIHandler(SimpleHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        if self.path.startswith("/v1/") or self.path.startswith("/chat"):
+        if not self.path.startswith("/static/"):
             self._proxy_request("POST")
         else:
             self.send_error(404)
@@ -126,6 +126,7 @@ def start_api_server():
     config.setup_openvino()
 
     from core.engine import ModelEngine
+    from core.base import GenerateConfig
     from adapters.chat import ChatAdapter
 
     engine = ModelEngine()
@@ -135,6 +136,9 @@ def start_api_server():
     print(f"Loading model from {adapter.model_path}...")
     adapter.load()
     print(f"Model loaded in {adapter._load_time_ms:.0f}ms")
+    print("Warming up model...")
+    adapter.generate([{"role": "user", "content": "hi"}], GenerateConfig(max_length=1))
+    print("Warmup complete.")
 
     from app import create_app
     import uvicorn

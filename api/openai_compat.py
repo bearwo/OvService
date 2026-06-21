@@ -121,6 +121,15 @@ async def chat_completions(req: OpenAIChatRequest):
     text = result.text if hasattr(result, "text") else str(result)
 
     prompt_tokens = 0
+    try:
+        adapter = engine.active()
+        if adapter and hasattr(adapter, '_pipe') and adapter._pipe:
+            tok = adapter._pipe.get_tokenizer()
+            prompt_text = " ".join(m.get("content", "") for m in messages if m.get("content"))
+            encoded = tok.encode(prompt_text)
+            prompt_tokens = encoded.input_ids.shape[1] if len(encoded.input_ids.shape) > 1 else len(encoded.input_ids.data)
+    except Exception:
+        pass
     completion_tokens = result.tokens if result.tokens else 0
     total_tokens = prompt_tokens + completion_tokens
 

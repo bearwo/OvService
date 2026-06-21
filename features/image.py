@@ -9,7 +9,7 @@ from PIL import Image
 def load_image_as_tensor(image_path: str | Path) -> ov.Tensor:
     img = Image.open(image_path).convert("RGB")
     import numpy as np
-    arr = np.array(img)
+    arr = np.array(img)[None]
     return ov.Tensor(arr)
 
 
@@ -17,7 +17,7 @@ def load_image_from_bytes(data: bytes) -> ov.Tensor:
     import io
     img = Image.open(io.BytesIO(data)).convert("RGB")
     import numpy as np
-    arr = np.array(img)
+    arr = np.array(img)[None]
     return ov.Tensor(arr)
 
 

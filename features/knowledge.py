@@ -20,10 +20,11 @@ class KnowledgeBase:
         self._ensure_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        from features.memory import ConversationMemory
-        if not hasattr(self, '_memory_instance'):
-            self._memory_instance = ConversationMemory(self._db_path)
-        return self._memory_instance._get_conn()
+        if self._conn is None:
+            self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute('PRAGMA journal_mode=WAL')
+        return self._conn
 
     def _ensure_db(self) -> None:
         with self._db_lock:
@@ -139,5 +140,7 @@ class KnowledgeBase:
         return False
 
     def close(self) -> None:
-        if hasattr(self, '_memory_instance'):
-            self._memory_instance.close()
+        with self._db_lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None

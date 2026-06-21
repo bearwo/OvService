@@ -3,6 +3,7 @@ const API_DIRECT = `${window.location.protocol}//${window.location.hostname}:800
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
+const stopBtn = document.getElementById('stop-btn');
 const tempSlider = document.getElementById('temperature');
 const tempValue = document.getElementById('temp-value');
 const tokensSlider = document.getElementById('max-tokens');
@@ -68,6 +69,7 @@ inputEl.oninput = function() {
 };
 
 sendBtn.onclick = sendMessage;
+stopBtn.onclick = stopGeneration;
 newChatBtn.onclick = newChat;
 clearChatBtn.onclick = clearChat;
 
@@ -125,6 +127,7 @@ async function sendMessage() {
 
     isGenerating = true;
     sendBtn.disabled = true;
+    stopBtn.style.display = 'inline-block';
     inputEl.value = '';
     inputEl.style.height = 'auto';
 
@@ -158,8 +161,21 @@ async function sendMessage() {
     } finally {
         isGenerating = false;
         sendBtn.disabled = false;
+        stopBtn.style.display = 'none';
         messagesEl.scrollTop = messagesEl.scrollHeight;
         saveToHistory(userMsg);
+    }
+}
+
+async function stopGeneration() {
+    if (currentStreamReader) {
+        currentStreamReader.cancel();
+        currentStreamReader = null;
+    }
+    try {
+        await fetch(`${API_DIRECT}/chat/stream/interrupt`, { method: 'POST' });
+    } catch (e) {
+        console.error('Failed to interrupt:', e);
     }
 }
 
@@ -251,6 +267,8 @@ document.getElementById('model-select').onchange = async (e) => {
 
 loadModels();
 
+let currentStreamReader = null;
+
 async function streamResponse(text, contentEl) {
     if (!messages || messages.length === 0) {
         messages = [{ role: 'user', content: text }];
@@ -273,36 +291,45 @@ async function streamResponse(text, contentEl) {
     }
 
     const reader = res.body.getReader();
+    currentStreamReader = reader;
     const decoder = new TextDecoder();
     let fullText = '';
     let buffer = '';
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
 
-        for (const line of lines) {
-            const trimmed = line.trim();
-            if (trimmed.startsWith('data: ')) {
-                const data = trimmed.slice(6);
-                if (data === '[DONE]') continue;
-                    try {
-                        const parsed = JSON.parse(data);
-                        const delta = parsed.choices[0].delta;
-                        if (delta && delta.content) {
-                            fullText += delta.content;
-                            contentEl.innerHTML = formatResponse(fullText);
-                            messagesEl.scrollTop = messagesEl.scrollHeight;
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed.startsWith('data: ')) {
+                    const data = trimmed.slice(6);
+                    if (data === '[DONE]') continue;
+                        try {
+                            const parsed = JSON.parse(data);
+                            const delta = parsed.choices[0].delta;
+                            if (delta && delta.content) {
+                                fullText += delta.content;
+                                contentEl.innerHTML = formatResponse(fullText);
+                                messagesEl.scrollTop = messagesEl.scrollHeight;
+                            }
+                        } catch (e) {
+                            console.warn('SSE parse error:', e.message, data);
                         }
-                    } catch (e) {
-                        console.warn('SSE parse error:', e.message, data);
-                    }
+                }
             }
         }
+    } catch (e) {
+        if (e.name !== 'AbortError') {
+            throw e;
+        }
+    } finally {
+        currentStreamReader = null;
     }
 
     messages.push({ role: 'assistant', content: fullText });

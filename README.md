@@ -5,12 +5,16 @@
 ## 功能特性
 
 - **多模态对话**：文本聊天 + 图片理解（VLM）+ 文档上传
+- **图片按需加载**：智能检测用户是否询问图片，仅在需要时加载，10轮对话内缓存
+- **文件按需处理**：同图片逻辑，关键词检测自动加载相关文件
+- **流式中断支持**：Web UI 支持停止生成按钮
 - **动态上下文管理**：自动检测模型上下文长度，智能压缩历史对话
 - **分层记忆系统**：对话摘要 → 数据库压缩 → 长期记忆注入
 - **乱码检测与恢复**：自动检测输出异常，截断上下文重试
+- **异常安全恢复**：模型异常时自动清理状态，支持自动重载恢复
 - **OpenAI 兼容 API**：标准 `/v1/chat/completions` 端点，支持 Codex 接入
 - **可插拔 Web UI**：独立模块，不影响核心功能
-- **多 Session 并发**：支持多个会话同时使用，互不干扰
+- **多会话隔离**：支持多个会话同时使用，请求按 FIFO 排队串行执行，确保上下文不串线
 
 ## 技术栈
 
@@ -28,7 +32,7 @@
 
 ### 环境要求
 
-- Python 3.10+
+- Python 3.14
 - Intel Arc GPU 或支持 OpenVINO 的 CPU
 - OpenVINO GenAI 运行时
 
@@ -139,7 +143,6 @@ python -u cli.py
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `OPENVINO_LIB_PATHS` | - | OpenVINO DLL 路径（必须设置） |
-| `OVSERVICE_MAX_CONCURRENT` | 2 | 最大并发推理数 |
 | `OVSERVICE_CORS_ALLOW_ALL` | 1 | CORS 允许所有来源（生产环境设为 0） |
 
 ### config.py 关键配置
@@ -170,8 +173,7 @@ OvService/
 ├── core/
 │   ├── base.py             # 模型适配器基类
 │   ├── engine.py           # 模型调度引擎
-│   ├── conversation.py     # 对话管理 + 动态压缩
-│   └── optimize.py         # 性能优化
+│   └── conversation.py     # 对话管理 + 动态压缩
 ├── adapters/
 │   └── chat.py             # Qwen3.6 VLMPipeline 适配器
 ├── features/
@@ -183,8 +185,7 @@ OvService/
 │   ├── routes.py           # 业务 API
 │   ├── openai_compat.py    # OpenAI 兼容 API
 │   ├── schemas.py          # 数据模型
-│   ├── session.py          # 会话管理
-│   └── task_queue.py       # 任务队列
+│   └── session.py          # 会话管理
 ├── webui/                  # 可插拔 Web UI
 │   ├── server.py           # Web 服务器
 │   ├── templates/
@@ -220,10 +221,9 @@ OvService/
 
 ## 已知限制
 
-1. `/nothink` 命令无法完全关闭 Qwen3.6 的思考模式
-2. 知识库检索仅支持关键词匹配，无向量搜索
-3. 单 GPU 限制，无法多卡并行
-4. Web UI 图片回复使用伪流式（生成完成后逐字显示）
+1. 知识库检索仅支持关键词匹配，无向量搜索
+2. 单 GPU 限制，无法多卡并行
+3. Web UI 图片回复使用伪流式（生成完成后逐字显示）
 
 ## 版本历史
 
@@ -234,6 +234,13 @@ OvService/
 | 1.2 | 2026-06-20 | OpenAI 兼容 API，安全修复，稳定性优化 |
 | 1.3 | 2026-06-20 | Web UI 模块，流式输出修复，全面代码审查优化 |
 | 1.4 | 2026-06-20 | 多 session 并发修复，图片理解修复，80+ 问题修复 |
+| 1.5 | 2026-06-21 | 全面代码审查优化，18项问题修复 |
+| | | **P0 严重问题修复**：finish_chat 异常安全、图片 tensor batch 维度、乱码检测重写、CLI 图片上下文修复 |
+| | | **P1 重要问题修复**：session 清理策略、CLI 流式输出、token 计数、知识库连接解耦、thinking 模式修复、MAX_CONCURRENT 清理 |
+| | | **P2 一致性修复**：README 文档修正、prompt_tokens 计算、WebUI 代理扩展、路径校验安全 |
+| | | **P3 增强**：模型预热、流式中断支持（停止按钮） |
+| | | **图片管理重构**：按需加载、10轮缓存、关键词智能检测、对话历史保留 |
+| | | **上下文管理优化**：压缩阈值降低、tokenizer 注入、硬截断保护移除 |
 
 ## 许可证
 
